@@ -18,6 +18,8 @@ import time
 import numpy as np
 import pycocotools.mask as mask_util
 
+from tqdm import tqdm
+
 
 def get_masks(result, num_classes=80):
     for cur_result in result:
@@ -137,6 +139,7 @@ def parse_args():
         '--json_out',
         help='output result file name without extension',
         type=str)
+    parser.add_argument('--vdo_out_folder', type=str)
     parser.add_argument(
         '--eval',
         type=str,
@@ -157,10 +160,23 @@ def parse_args():
     return args
 
 
+def rleToMask(rleString, height, width):
+    rows, cols = height, width
+    rleNumbers = [int(numstring) for numstring in rleString.split(' ')]
+    rlePairs = np.array(rleNumbers).reshape(-1, 2)
+    mask = np.zeros(rows * cols, dtype=np.uint8)
+    for index,length in rlePairs:
+        index -= 1
+        mask[index:index+length] = 255
+    mask = mask.reshape(cols,rows)
+    mask = mask.T
+    return mask
+
+
 def main():
     args = parse_args()
 
-    assert args.out or args.show or args.json_out, \
+    assert args.out or args.show or args.json_out or args.vdo_out_folder, \
         ('Please specify at least one operation (save or show the results) '
          'with the argument "--out" or "--show" or "--json_out"')
 
@@ -251,6 +267,60 @@ def main():
                 outputs_ = [out[name] for out in outputs]
                 result_file = args.json_out + '.{}'.format(name)
                 results2json(dataset, outputs_, result_file)
+
+    # Save predictions in RLE format for VDO
+    '''
+    if args.vdo_out_folder and rank == 0:
+        if not osp.exists(args.vdo_out_folder):
+            os.mkdir(args.vdo_out_folder)
+        for i in range(len(dataset)):
+            img_id = dataset.img_infos[i]['id']
+            file_name = dataset.img_infos[i]['file_name']
+            width = dataset.img_infos[i]['width']
+            height = dataset.img_infos[i]['height']
+            results = outputs[i]
+            lines = ['{} {}\n'.format(width, height).encode()]
+            for class_id in range(len(results)):
+                for segm in results[class_id]:
+                    lines.append('{} '.format(class_id).encode())
+                    lines.append(segm[0]['counts'])
+                    lines.append('\n'.encode())
+            out_file_name = '.'.join(file_name.split('.')[:-1] + ['txt'])
+            with open(osp.join(args.vdo_out_folder, out_file_name), 'wb') as f:
+                f.writelines(lines)
+    '''
+
+    # Save predictions in default format for VDO
+    if args.vdo_out_folder and rank == 0:
+        if not osp.exists(args.vdo_out_folder):
+            os.mkdir(args.vdo_out_folder)
+        for i in tqdm(range(len(dataset))):
+            file_name = dataset.img_infos[i]['file_name']
+            width = dataset.img_infos[i]['width']
+            height = dataset.img_infos[i]['height']
+            results = outputs[i]
+            mask = np.zeros((height, width), dtype=np.uint8)
+
+            obj_id = 1
+            for class_id in range(len(results)):
+                for segm in results[class_id]:
+                    m = mask_util.decode(segm[0])
+                    m = m * obj_id
+                    mask[m > 0] = m[m > 0]
+                    obj_id += 1
+
+            lines = list()
+            for y in range(mask.shape[0]):
+                line = str()
+                for x in range(mask.shape[1]):
+                    line = line + str(mask[y][x]) + ' '
+                if y != mask.shape[0] - 1:
+                    line = line + '\n'
+                lines.append(line)
+
+            out_file_name = '.'.join(file_name.split('.')[:-1] + ['txt'])
+            with open(osp.join(args.vdo_out_folder, out_file_name), 'w') as f:
+                f.writelines(lines)
 
 
 if __name__ == '__main__':
